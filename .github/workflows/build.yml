@@ -1,0 +1,791 @@
+name: Build Study Lock APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create project files
+        run: |
+          set -e
+          cat > settings.gradle.kts <<'EOF_FILE'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "StudyLock"
+          include(":app")
+          EOF_FILE
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.5.2"
+              id("org.jetbrains.kotlin.android") version "1.9.24"
+          }
+
+          android {
+              namespace = "com.example.studylock"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.studylock"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          EOF_FILE
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+              <application
+                  android:label="@string/app_name"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <activity
+                      android:name=".AllowedAppsActivity"
+                      android:exported="false" />
+
+                  <service
+                      android:name=".BlockerService"
+                      android:exported="true"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+
+                  <receiver
+                      android:name=".AdminReceiver"
+                      android:exported="true"
+                      android:permission="android.permission.BIND_DEVICE_ADMIN">
+                      <meta-data
+                          android:name="android.app.device_admin"
+                          android:resource="@xml/device_admin" />
+                      <intent-filter>
+                          <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+                      </intent-filter>
+                  </receiver>
+
+              </application>
+
+          </manifest>
+          EOF_FILE
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/strings.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Study Lock</string>
+              <string name="service_desc">पढ़ाई के सत्र के दौरान यह देखता है कि कौन-सा ऐप खुला है, और allowed लिस्ट से बाहर का ऐप खुलने पर चेतावनी दिखाता है। यह कोई डेटा इकट्ठा या भेजता नहीं है।</string>
+          </resources>
+          EOF_FILE
+          mkdir -p app/src/main/res/xml
+          cat > app/src/main/res/xml/accessibility_config.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:description="@string/service_desc"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:notificationTimeout="100"
+              android:canRetrieveWindowContent="false" />
+          EOF_FILE
+          mkdir -p app/src/main/res/xml
+          cat > app/src/main/res/xml/device_admin.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-policies />
+          </device-admin>
+          EOF_FILE
+          mkdir -p app/src/main/java
+          cat > app/src/main/java/Prefs.kt <<'EOF_FILE'
+          package com.example.studylock
+
+          import android.content.Context
+
+          object Prefs {
+              private fun sp(c: Context) = c.getSharedPreferences("studylock", Context.MODE_PRIVATE)
+
+              fun endTime(c: Context): Long = sp(c).getLong("end", 0L)
+
+              fun setEndTime(c: Context, t: Long) {
+                  sp(c).edit().putLong("end", t).apply()
+              }
+
+              fun isActive(c: Context): Boolean = System.currentTimeMillis() < endTime(c)
+
+              fun allowed(c: Context): Set<String> =
+                  sp(c).getStringSet("allowed", emptySet())?.toSet() ?: emptySet()
+
+              fun setAllowed(c: Context, s: Set<String>) {
+                  sp(c).edit().putStringSet("allowed", HashSet(s)).apply()
+              }
+          }
+          EOF_FILE
+          mkdir -p app/src/main/java
+          cat > app/src/main/java/AdminReceiver.kt <<'EOF_FILE'
+          package com.example.studylock
+
+          import android.app.admin.DeviceAdminReceiver
+          import android.content.Context
+          import android.content.Intent
+
+          class AdminReceiver : DeviceAdminReceiver() {
+              override fun onDisableRequested(context: Context, intent: Intent): CharSequence? {
+                  return if (Prefs.isActive(context)) {
+                      "पढ़ाई का सत्र चल रहा है! अभी Admin बंद मत करो। पहले अपना लक्ष्य पूरा करो 💪"
+                  } else {
+                      "Admin बंद करने के बाद ऐप डिलीट हो सकेगा।"
+                  }
+              }
+          }
+          EOF_FILE
+          mkdir -p app/src/main/java
+          cat > app/src/main/java/AllowedAppsActivity.kt <<'EOF_FILE'
+          package com.example.studylock
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.graphics.Color
+          import android.os.Bundle
+          import android.view.ViewGroup
+          import android.widget.CheckBox
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+
+          class AllowedAppsActivity : Activity() {
+
+              private val boxes = ArrayList<CheckBox>()
+              private val pkgs = ArrayList<String>()
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.statusBarColor = Color.parseColor("#0E1020")
+                  window.navigationBarColor = Color.parseColor("#0E1020")
+
+                  val pm = packageManager
+                  val skip = setOf(
+                      packageName,
+                      "com.android.settings",
+                      "com.android.packageinstaller",
+                      "com.google.android.packageinstaller",
+                      "com.google.android.permissioncontroller",
+                      "com.android.permissioncontroller"
+                  )
+                  val launch = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                  val apps = pm.queryIntentActivities(launch, 0)
+                      .map { it.activityInfo.packageName to it.loadLabel(pm).toString() }
+                      .distinctBy { it.first }
+                      .filter { it.first !in skip }
+                      .sortedBy { it.second.lowercase() }
+
+                  val saved = Prefs.allowed(this)
+
+                  val scroll = ScrollView(this).apply { setBackgroundColor(Color.parseColor("#0E1020")) }
+                  val col = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(20), dp(24), dp(20), dp(32))
+                  }
+                  scroll.addView(col)
+
+                  col.addView(TextView(this).apply {
+                      text = "Allowed ऐप्स"
+                      textSize = 26f
+                      setTextColor(Color.WHITE)
+                  })
+                  col.addView(TextView(this).apply {
+                      text = "पढ़ाई के दौरान जिन ऐप्स पर चेतावनी नहीं आनी चाहिए, उन्हें टिक करो। (Phone, कीबोर्ड और होम स्क्रीन हमेशा allowed रहते हैं।)"
+                      textSize = 14f
+                      setTextColor(Color.parseColor("#8B90B0"))
+                      setPadding(0, dp(6), 0, dp(12))
+                  })
+
+                  for ((pkg, label) in apps) {
+                      val cb = CheckBox(this)
+                      cb.text = label
+                      cb.textSize = 18f
+                      cb.setTextColor(Color.WHITE)
+                      cb.isChecked = pkg in saved
+                      cb.setPadding(dp(8), dp(12), dp(8), dp(12))
+                      boxes.add(cb)
+                      pkgs.add(pkg)
+                      col.addView(
+                          cb,
+                          LinearLayout.LayoutParams(
+                              ViewGroup.LayoutParams.MATCH_PARENT,
+                              ViewGroup.LayoutParams.WRAP_CONTENT
+                          )
+                      )
+                  }
+                  setContentView(scroll)
+              }
+
+              override fun onPause() {
+                  super.onPause()
+                  val chosen = HashSet<String>()
+                  for (i in boxes.indices) {
+                      if (boxes[i].isChecked) chosen.add(pkgs[i])
+                  }
+                  Prefs.setAllowed(this, chosen)
+              }
+          }
+          EOF_FILE
+          mkdir -p app/src/main/java
+          cat > app/src/main/java/BlockerService.kt <<'EOF_FILE'
+          package com.example.studylock
+
+          import android.accessibilityservice.AccessibilityService
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Handler
+          import android.os.Looper
+          import android.telecom.TelecomManager
+          import android.view.Gravity
+          import android.view.View
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.inputmethod.InputMethodManager
+          import android.widget.Button
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
+
+          private val ALWAYS_ALLOWED = setOf(
+              "android",
+              "com.android.systemui",
+              "com.android.dialer",
+              "com.google.android.dialer",
+              "com.samsung.android.dialer",
+              "com.android.incallui",
+              "com.samsung.android.incallui",
+              "com.android.server.telecom",
+              "com.android.phone",
+              "com.android.contacts",
+              "com.google.android.contacts",
+              "com.samsung.android.app.contacts"
+          )
+
+          class BlockerService : AccessibilityService() {
+
+              private val handler = Handler(Looper.getMainLooper())
+              private var banner: View? = null
+              private var lastPkg = ""
+              private var lastShown = 0L
+              private val autoHide = Runnable { removeBanner() }
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+                  if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+                  val pkg = event.packageName?.toString() ?: return
+                  val now = System.currentTimeMillis()
+
+                  if (!Prefs.isActive(this)) {
+                      removeBanner()
+                      lastPkg = ""
+                      return
+                  }
+                  // our own warning window also sends events; ignore them right after showing
+                  if (pkg == packageName && now - lastShown < 1500) return
+
+                  if (isAllowed(pkg)) {
+                      removeBanner()
+                      lastPkg = pkg
+                      return
+                  }
+                  if (pkg != lastPkg || now - lastShown > 60_000) {
+                      showBanner(pkg)
+                      lastShown = now
+                  }
+                  lastPkg = pkg
+              }
+
+              override fun onInterrupt() {}
+
+              override fun onDestroy() {
+                  removeBanner()
+                  super.onDestroy()
+              }
+
+              private fun isAllowed(pkg: String): Boolean {
+                  if (pkg == packageName) return true
+                  if (pkg in ALWAYS_ALLOWED) return true
+                  if (pkg in Prefs.allowed(this)) return true
+                  if (pkg in dynamicAllowed()) return true
+                  return false
+              }
+
+              private fun dynamicAllowed(): Set<String> {
+                  val set = HashSet<String>()
+                  try {
+                      val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+                      packageManager.queryIntentActivities(home, 0).forEach { set.add(it.activityInfo.packageName) }
+                  } catch (e: Exception) {
+                  }
+                  try {
+                      val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                      imm.enabledInputMethodList.forEach { set.add(it.packageName) }
+                  } catch (e: Exception) {
+                  }
+                  try {
+                      val tm = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+                      tm.defaultDialerPackage?.let { set.add(it) }
+                  } catch (e: Exception) {
+                  }
+                  return set
+              }
+
+              private fun smallBtn(label: String, onClick: () -> Unit): Button {
+                  val b = Button(this)
+                  b.text = label
+                  b.isAllCaps = false
+                  b.textSize = 14f
+                  b.setTextColor(Color.parseColor("#2D3436"))
+                  b.background = GradientDrawable().apply {
+                      cornerRadius = dp(12).toFloat()
+                      setColor(Color.WHITE)
+                  }
+                  b.stateListAnimator = null
+                  b.setOnClickListener { onClick() }
+                  return b
+              }
+
+              private fun showBanner(pkg: String) {
+                  removeBanner()
+                  val label = try {
+                      packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+                  } catch (e: Exception) {
+                      pkg
+                  }
+                  val mins = ((Prefs.endTime(this) - System.currentTimeMillis()) / 60000L) + 1
+
+                  val box = LinearLayout(this)
+                  box.orientation = LinearLayout.VERTICAL
+                  box.setPadding(dp(16), dp(14), dp(16), dp(14))
+                  box.background = GradientDrawable().apply {
+                      cornerRadius = dp(16).toFloat()
+                      setColor(Color.parseColor("#E17055"))
+                  }
+
+                  val msg = TextView(this)
+                  msg.text = "⚠️ पढ़ाई चल रही है!\n$label अभी allowed नहीं है।\nबचा समय: $mins मिनट"
+                  msg.setTextColor(Color.WHITE)
+                  msg.textSize = 16f
+                  box.addView(msg)
+
+                  val row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+                  row.setPadding(0, dp(10), 0, 0)
+
+                  val homeBtn = smallBtn("🏠 होम पर जाओ") {
+                      performGlobalAction(GLOBAL_ACTION_HOME)
+                      removeBanner()
+                  }
+                  val studyBtn = smallBtn("📚 पढ़ाई खोलो") {
+                      val i = Intent(this, MainActivity::class.java)
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                      try {
+                          startActivity(i)
+                      } catch (e: Exception) {
+                      }
+                      removeBanner()
+                  }
+                  val lp1 = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  lp1.setMargins(0, 0, dp(6), 0)
+                  val lp2 = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  lp2.setMargins(dp(6), 0, 0, 0)
+                  row.addView(homeBtn, lp1)
+                  row.addView(studyBtn, lp2)
+                  box.addView(row)
+
+                  val frame = FrameLayout(this)
+                  frame.setPadding(dp(12), 0, dp(12), 0)
+                  frame.addView(box)
+
+                  val lp = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.MATCH_PARENT,
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP
+                  lp.y = dp(48)
+
+                  try {
+                      val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                      wm.addView(frame, lp)
+                      banner = frame
+                      handler.postDelayed(autoHide, 8000)
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "⚠️ पढ़ाई चल रही है! $label allowed नहीं है।", Toast.LENGTH_LONG).show()
+                  }
+              }
+
+              private fun removeBanner() {
+                  handler.removeCallbacks(autoHide)
+                  val b = banner ?: return
+                  try {
+                      val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                      wm.removeView(b)
+                  } catch (e: Exception) {
+                  }
+                  banner = null
+              }
+          }
+          EOF_FILE
+          mkdir -p app/src/main/java
+          cat > app/src/main/java/MainActivity.kt <<'EOF_FILE'
+          package com.example.studylock
+
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.app.admin.DevicePolicyManager
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.Settings
+          import android.text.InputType
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+          import java.security.SecureRandom
+
+          class MainActivity : Activity() {
+
+              private val handler = Handler(Looper.getMainLooper())
+              private lateinit var statusText: TextView
+              private lateinit var timerText: TextView
+              private lateinit var minutesInput: EditText
+              private lateinit var startBtn: Button
+              private lateinit var allowedBtn: Button
+              private lateinit var exitBtn: Button
+              private lateinit var accStatus: TextView
+              private lateinit var adminStatus: TextView
+
+              private val ticker = object : Runnable {
+                  override fun run() {
+                      refresh()
+                      handler.postDelayed(this, 1000)
+                  }
+              }
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              private fun makeText(t: String, size: Float, color: String = "#FFFFFF", bold: Boolean = false): TextView {
+                  val tv = TextView(this)
+                  tv.text = t
+                  tv.textSize = size
+                  tv.setTextColor(Color.parseColor(color))
+                  if (bold) tv.typeface = Typeface.DEFAULT_BOLD
+                  return tv
+              }
+
+              private fun makeBtn(label: String, color: String, onClick: () -> Unit): Button {
+                  val b = Button(this)
+                  b.text = label
+                  b.isAllCaps = false
+                  b.textSize = 16f
+                  b.setTextColor(Color.WHITE)
+                  b.background = GradientDrawable().apply {
+                      cornerRadius = dp(14).toFloat()
+                      setColor(Color.parseColor(color))
+                  }
+                  b.stateListAnimator = null
+                  b.setOnClickListener { onClick() }
+                  return b
+              }
+
+              private fun LinearLayout.addTo(v: View, topDp: Int = 12) {
+                  val lp = LinearLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      ViewGroup.LayoutParams.WRAP_CONTENT
+                  )
+                  lp.topMargin = dp(topDp)
+                  addView(v, lp)
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.statusBarColor = Color.parseColor("#0E1020")
+                  window.navigationBarColor = Color.parseColor("#0E1020")
+
+                  val scroll = ScrollView(this)
+                  scroll.setBackgroundColor(Color.parseColor("#0E1020"))
+                  val col = LinearLayout(this)
+                  col.orientation = LinearLayout.VERTICAL
+                  col.setPadding(dp(20), dp(24), dp(20), dp(32))
+                  scroll.addView(col)
+
+                  col.addTo(makeText("📚 Study Lock", 28f, bold = true), 0)
+                  statusText = makeText("", 16f, "#A29BFE")
+                  col.addTo(statusText, 8)
+
+                  timerText = makeText("00:00:00", 54f, bold = true)
+                  timerText.gravity = Gravity.CENTER
+                  col.addTo(timerText, 16)
+
+                  col.addTo(makeText("कितने मिनट पढ़ना है?", 14f, "#8B90B0"), 20)
+                  minutesInput = EditText(this)
+                  minutesInput.setText("60")
+                  minutesInput.inputType = InputType.TYPE_CLASS_NUMBER
+                  minutesInput.setTextColor(Color.WHITE)
+                  minutesInput.textSize = 22f
+                  minutesInput.gravity = Gravity.CENTER
+                  col.addTo(minutesInput, 4)
+
+                  val quick = LinearLayout(this)
+                  quick.orientation = LinearLayout.HORIZONTAL
+                  for (m in listOf(25, 45, 60, 90)) {
+                      val b = makeBtn("$m", "#2A2F55") { minutesInput.setText(m.toString()) }
+                      val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                      lp.setMargins(dp(3), 0, dp(3), 0)
+                      quick.addView(b, lp)
+                  }
+                  col.addTo(quick, 8)
+
+                  startBtn = makeBtn("▶  पढ़ाई शुरू करो", "#6C5CE7") { startSession() }
+                  col.addTo(startBtn, 16)
+
+                  allowedBtn = makeBtn("", "#1E2240") {
+                      startActivity(Intent(this, AllowedAppsActivity::class.java))
+                  }
+                  col.addTo(allowedBtn, 12)
+
+                  exitBtn = makeBtn("🚨 Emergency exit", "#D63031") { emergencyExit() }
+                  col.addTo(exitBtn, 12)
+
+                  col.addTo(makeText("ज़रूरी अनुमतियाँ", 18f, bold = true), 28)
+
+                  accStatus = makeText("", 15f)
+                  col.addTo(accStatus, 8)
+                  col.addTo(makeBtn("Accessibility चालू करो", "#2A2F55") {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  }, 6)
+
+                  adminStatus = makeText("", 15f)
+                  col.addTo(adminStatus, 14)
+                  col.addTo(makeBtn("Device Admin चालू करो (डिलीट से बचाव)", "#2A2F55") { requestAdmin() }, 6)
+                  col.addTo(makeBtn("Device Admin हटाओ (ऐप डिलीट करना हो तो)", "#1E2240") { removeAdmin() }, 6)
+
+                  col.addTo(makeBtn("Battery optimization बंद करो", "#2A2F55") {
+                      startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                  }, 14)
+
+                  col.addTo(
+                      makeText(
+                          "⚠️ Android 13+ में अगर Accessibility का स्विच ग्रे है या 'Restricted setting' लिखा आए, तो: फ़ोन Settings → Apps → Study Lock → ऊपर दाईं ⋮ → 'Allow restricted settings' दबाओ, फिर दोबारा Accessibility चालू करो।",
+                          13f, "#8B90B0"
+                      ), 16
+                  )
+
+                  setContentView(scroll)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  handler.post(ticker)
+              }
+
+              override fun onPause() {
+                  super.onPause()
+                  handler.removeCallbacks(ticker)
+              }
+
+              private fun fmtTime(ms: Long): String {
+                  val total = if (ms < 0) 0L else ms / 1000
+                  val h = total / 3600
+                  val m = (total % 3600) / 60
+                  val s = total % 60
+                  return String.format("%02d:%02d:%02d", h, m, s)
+              }
+
+              private fun adminComponent() = ComponentName(this, AdminReceiver::class.java)
+
+              private fun isAdminActive(): Boolean {
+                  val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                  return dpm.isAdminActive(adminComponent())
+              }
+
+              private fun isAccEnabled(): Boolean {
+                  val s = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+                      ?: return false
+                  return s.contains(packageName) && s.contains("BlockerService")
+              }
+
+              private fun refresh() {
+                  val active = Prefs.isActive(this)
+                  if (active) {
+                      val left = Prefs.endTime(this) - System.currentTimeMillis()
+                      timerText.text = fmtTime(left)
+                      statusText.text = "🔒 पढ़ाई चल रही है — फ़ोकस बनाए रखो!"
+                      startBtn.isEnabled = false
+                      startBtn.alpha = 0.4f
+                      minutesInput.isEnabled = false
+                      exitBtn.visibility = View.VISIBLE
+                  } else {
+                      timerText.text = "00:00:00"
+                      statusText.text = "तैयार हो? समय चुनो और शुरू करो"
+                      startBtn.isEnabled = true
+                      startBtn.alpha = 1f
+                      minutesInput.isEnabled = true
+                      exitBtn.visibility = View.GONE
+                  }
+                  allowedBtn.text = "Allowed ऐप्स चुनो (${Prefs.allowed(this).size} चुने)"
+                  accStatus.text = if (isAccEnabled()) "✅ Accessibility चालू है" else "❌ Accessibility बंद है (ब्लॉकर के लिए ज़रूरी)"
+                  adminStatus.text = if (isAdminActive()) "✅ Device Admin चालू है" else "❌ Device Admin बंद है"
+              }
+
+              private fun startSession() {
+                  val mins = minutesInput.text.toString().toIntOrNull() ?: 0
+                  if (mins < 1 || mins > 720) {
+                      Toast.makeText(this, "1 से 720 मिनट के बीच का समय डालो", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+                  if (!isAccEnabled()) {
+                      Toast.makeText(this, "पहले नीचे से Accessibility चालू करो", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  Prefs.setEndTime(this, System.currentTimeMillis() + mins * 60_000L)
+                  Toast.makeText(this, "पढ़ाई शुरू! $mins मिनट 💪", Toast.LENGTH_SHORT).show()
+                  refresh()
+              }
+
+              private fun emergencyExit() {
+                  val chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"
+                  val rnd = SecureRandom()
+                  val sb = StringBuilder()
+                  for (i in 1..20) sb.append(chars[rnd.nextInt(chars.length)])
+                  val code = sb.toString()
+                  val shown = code.chunked(4).joinToString("  ")
+
+                  val box = LinearLayout(this)
+                  box.orientation = LinearLayout.VERTICAL
+                  box.setPadding(dp(20), dp(12), dp(20), 0)
+
+                  val codeView = TextView(this)
+                  codeView.text = shown
+                  codeView.textSize = 20f
+                  codeView.typeface = Typeface.MONOSPACE
+                  box.addView(codeView)
+
+                  val input = EditText(this)
+                  input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                  input.hint = "ऊपर का कोड यहाँ टाइप करो"
+                  box.addView(input)
+
+                  AlertDialog.Builder(this)
+                      .setTitle("Emergency exit")
+                      .setMessage("सच में बाहर निकलना है? नीचे का कोड बिना गलती (कैपिटल/छोटे अक्षर समेत) टाइप करो:")
+                      .setView(box)
+                      .setPositiveButton("बाहर निकलो") { _, _ ->
+                          if (input.text.toString().replace(" ", "") == code) {
+                              Prefs.setEndTime(this, 0L)
+                              Toast.makeText(this, "सत्र खत्म कर दिया", Toast.LENGTH_SHORT).show()
+                              refresh()
+                          } else {
+                              Toast.makeText(this, "कोड गलत है — सत्र जारी है 💪", Toast.LENGTH_LONG).show()
+                          }
+                      }
+                      .setNegativeButton("रहने दो", null)
+                      .show()
+              }
+
+              private fun requestAdmin() {
+                  if (isAdminActive()) {
+                      Toast.makeText(this, "Device Admin पहले से चालू है", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+                  val i = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
+                  i.putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, adminComponent())
+                  i.putExtra(
+                      DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                      "इसे चालू करने पर यह ऐप आसानी से डिलीट नहीं हो पाएगा।"
+                  )
+                  startActivity(i)
+              }
+
+              private fun removeAdmin() {
+                  if (Prefs.isActive(this)) {
+                      Toast.makeText(this, "पढ़ाई का सत्र चल रहा है — अभी नहीं 😉", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                  dpm.removeActiveAdmin(adminComponent())
+                  refresh()
+              }
+          }
+          EOF_FILE
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: studylock-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          
